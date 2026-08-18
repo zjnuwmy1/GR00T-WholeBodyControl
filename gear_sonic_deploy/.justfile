@@ -16,10 +16,15 @@ default:
 CORES := if os() == "macos" { `sysctl -n hw.ncpu` } else if os() == "linux" { `nproc` } else { "1" }
 
 # Build the project
+# CMAKE_EXTRA_ARGS is passed through to configure, so a caller can select the
+# inference backend without editing this file, e.g.
+#   CMAKE_EXTRA_ARGS=-DUSE_TENSORRT=OFF just build
+# Passing it explicitly (rather than relying on the CMake cache) keeps the choice
+# correct after `just clean` wipes build/.
 build *build_type='Release':
   @mkdir -p build
   @echo "Configuring the build system..."
-  @cd build && cmake -S .. -B . -DCMAKE_BUILD_TYPE={{build_type}} -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+  @cd build && cmake -S .. -B . -DCMAKE_BUILD_TYPE={{build_type}} -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ${CMAKE_EXTRA_ARGS:-}
   @echo "Building the project..."
   @cd build && cmake --build . -j{{CORES}}
 

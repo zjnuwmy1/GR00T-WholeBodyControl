@@ -14,6 +14,7 @@
 #ifndef ORT_SESSION_HPP
 #define ORT_SESSION_HPP
 
+#include <cstdlib>
 #include <string>
 #include <vector>
 #include <iostream>
@@ -42,14 +43,29 @@ public:
      * 2. Queries and stores input/output metadata from the model
      * 3. Prepares internal data structures for efficient inference
      */
+    // Build the session options BEFORE the session. The original code passed
+    // SessionOptions{nullptr} (= ORT defaults: full-size, spin-waiting pool) and
+    // then configured a local `session_options` it never used -- so the planner
+    // session ran with a ~num-cores spinning pool regardless. Same policy as
+    // OrtInference/InferenceEngine.cpp: capped pool, no spinning, override via
+    // WBC_ORT_INTRA_THREADS.
+    static Ort::SessionOptions MakeSessionOptions() {
+        Ort::SessionOptions so;
+        int intra_threads = 4;
+        if (const char* env_v = std::getenv("WBC_ORT_INTRA_THREADS")) {
+            const int v = std::atoi(env_v);
+            if (v > 0) intra_threads = v;
+        }
+        so.SetIntraOpNumThreads(intra_threads);
+        so.AddConfigEntry("session.intra_op.allow_spinning", "0");
+        so.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        return so;
+    }
+
     OrtSession(std::string model_path, Ort::Env &env, Ort::AllocatorWithDefaultOptions &allocator) :
-        m_session(env, model_path.c_str(), Ort::SessionOptions {nullptr}),
+        m_session(env, model_path.c_str(), MakeSessionOptions()),
         m_model_path(model_path)
     {
-        // Configure session options for optimal performance
-        Ort::SessionOptions session_options;
-        session_options.SetIntraOpNumThreads(1);  // Use single thread for intra-op parallelism
-        session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);  // Enable extended optimizations
 
         // Discover and catalog all input nodes from the ONNX model
         size_t num_input_nodes = m_session.GetInputCount();

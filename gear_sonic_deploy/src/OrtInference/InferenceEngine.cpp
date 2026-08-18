@@ -3,6 +3,7 @@
 #include <onnxruntime_cxx_api.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <numeric>
@@ -106,10 +107,23 @@ bool OrtInferenceEngine::Initialize(const std::string& modelPath, int /*deviceID
         m_impl = std::make_shared<Impl>();
 
         m_impl->session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-        // 0 lets ORT size the intra-op pool to the machine. The control thread is
-        // the latency-critical caller; leaving this at the default measured well
-        // within the 20 ms budget on x86_64.
-        m_impl->session_options.SetIntraOpNumThreads(0);
+        // Cap the intra-op pool and disable spin-waiting. The first cut used
+        // SetIntraOpNumThreads(0) (= one full-size pool per session, spinning
+        // between inferences); with encoder+decoder+planner sessions live the
+        // deploy pinned 21.5 of 24 logical cores, starving the MuJoCo sim and
+        // the 50 Hz control thread, and planner inference degraded ~9x (28 ms
+        // -> 255 ms) from self-inflicted contention. Measured on a 24-thread
+        // Ryzen AI 9 HX 370 at 4 threads, spinning off: encoder 4.9 ms,
+        // decoder 2.2 ms, planner 28 ms -- all comfortably inside their 20 /
+        // 100 ms budgets. Override via WBC_ORT_INTRA_THREADS if a different
+        // host wants a different trade.
+        int intra_threads = 4;
+        if (const char* env = std::getenv("WBC_ORT_INTRA_THREADS")) {
+            const int v = std::atoi(env);
+            if (v > 0) intra_threads = v;
+        }
+        m_impl->session_options.SetIntraOpNumThreads(intra_threads);
+        m_impl->session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
         m_impl->session_options.SetExecutionMode(ORT_SEQUENTIAL);
 
         m_impl->session = std::make_unique<Ort::Session>(

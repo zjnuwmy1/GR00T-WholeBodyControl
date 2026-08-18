@@ -152,16 +152,29 @@ public:
             specific_target_headings_.resize(4, 0.0f);
             allowed_pred_num_tokens_.resize(11, 0);
 
-            // default allowed tokens: [1,1,1,1,1,1,0,0,0,0,0]
+            // Match LocalMotionPlannerTensorRT exactly: [0,0,0,1,1,1,0,...].
+            // This file predates that change and still carried the old
+            // [1,1,1,1,1,1,...] mask, which additionally permits the three
+            // shortest prediction horizons -- so the CPU planner could emit
+            // plans the TensorRT deployment never would, and the resulting gait
+            // visibly diverged from the NVIDIA-host behaviour.
             if (allowed_pred_num_tokens_.size() >= 6) {
-                allowed_pred_num_tokens_[0] = 1;
-                allowed_pred_num_tokens_[1] = 1;
-                allowed_pred_num_tokens_[2] = 1;
+                allowed_pred_num_tokens_[0] = 0;
+                allowed_pred_num_tokens_[1] = 0;
+                allowed_pred_num_tokens_[2] = 0;
                 allowed_pred_num_tokens_[3] = 1;
                 allowed_pred_num_tokens_[4] = 1;
                 allowed_pred_num_tokens_[5] = 1;
             }
         }
+
+        // Rebuild the bindings from scratch. Without this clear(), every
+        // re-initialization (each policy stop -> start cycle) push_back'ed a
+        // second full set: OrtSession::Run then passed input_tensors.size()==22
+        // against an 11-entry name array, and ORT's read past the end of the
+        // names segfaulted on the first replan after re-init.
+        planner_input_tensors_.clear();
+        unknown_input_backing_.clear();
 
         const auto &input_names = planner_session_->get_input_node_names_str();
         const auto &input_dims = planner_session_->get_input_node_dims();
@@ -190,12 +203,14 @@ public:
             } else if (name == "allowed_pred_num_tokens") {
                 planner_input_tensors_.push_back(Ort::Value::CreateTensor<int64_t>(allocator_.GetInfo(), allowed_pred_num_tokens_.data(), allowed_pred_num_tokens_.size(), input_dims[i].data(), input_dims[i].size()));
             } else {
-                // Unknown input; create a zero tensor of expected type/shape to satisfy model binding
-                // Default to float tensor
-                std::vector<float> zero;
+                // Unknown input; bind a zero tensor of the expected shape. The
+                // backing storage must outlive this loop iteration --
+                // CreateTensor wraps the buffer without copying, so a local
+                // vector here would dangle the moment the iteration ended.
                 size_t count = 1;
                 for (auto d : input_dims[i]) { if (d > 0) count *= static_cast<size_t>(d); }
-                zero.resize(count, 0.0f);
+                unknown_input_backing_.emplace_back(count, 0.0f);
+                auto &zero = unknown_input_backing_.back();
                 planner_input_tensors_.push_back(Ort::Value::CreateTensor<float>(allocator_.GetInfo(), zero.data(), zero.size(), input_dims[i].data(), input_dims[i].size()));
             }
         }
@@ -244,6 +259,7 @@ private:
     std::vector<float> specific_target_headings_;     ///< [4]  4 waypoint heading angles.
     std::vector<int64_t> allowed_pred_num_tokens_;    ///< [11] Allowed prediction token mask.
     std::vector<Ort::Value> planner_input_tensors_;   ///< ONNX input tensor handles (alias above buffers).
+    std::vector<std::vector<float>> unknown_input_backing_;  ///< Owns zero-fill buffers for unknown inputs (tensors alias them).
     
     // ------------------------------------------------------------------
     // Output tensors
@@ -259,8 +275,9 @@ private:
                            const std::array<float, 3>& movement_direction,
                            const std::array<float, 3>& facing_direction,
                            int random_seed) override{
-        // Update mode
-        mode_values_[0] = mode_value;
+        // Update mode -- clamp out-of-range values to IDLE, same as the
+        // TensorRT planner does.
+        mode_values_[0] = mode_value < GetValidModeValueRange() ? mode_value : 0;
         
         // Update target velocity
         target_vel_values_[0] = target_vel;
@@ -307,6 +324,10 @@ private:
                 std::cout << "UNKNOWN";
                 break;
         }
+        // The labels above are the V0 mode names; under V1/V2 numbering they are
+        // wrong past RUN (e.g. 4 is IDLE_SQUAT, not BOXING). Print the raw id so
+        // the log stays unambiguous either way.
+        std::cout << " (id " << mode_values_[0] << ")";
         if (config_.version == 1 || config_.version == 2) {
             std::cout << ", target_height: " << target_height_values_[0];
         }

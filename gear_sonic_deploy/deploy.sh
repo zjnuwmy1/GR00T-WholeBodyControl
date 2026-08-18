@@ -457,15 +457,22 @@ else
     echo -e "${GREEN}✅ just is already installed${NC}"
 fi
 
-# Check if other essential tools are available
+# Check if other essential tools are available.
+# The build only needs *a* C++20 compiler, so accept g++ where clang is absent --
+# otherwise a perfectly buildable host is sent to install_deps.sh, which needs
+# sudo and therefore dies when launched from a GUI with no terminal.
 DEPS_OK=true
-for cmd in cmake clang git; do
+for cmd in cmake git; do
     if ! command -v $cmd &> /dev/null; then
         echo -e "${YELLOW}⚠️  $cmd not found, will run install_deps.sh${NC}"
         DEPS_OK=false
         break
     fi
 done
+if [ "$DEPS_OK" = true ] && ! command -v clang &> /dev/null && ! command -v g++ &> /dev/null; then
+    echo -e "${YELLOW}⚠️  no C++ compiler (clang or g++) found, will run install_deps.sh${NC}"
+    DEPS_OK=false
+fi
 
 if [ "$DEPS_OK" = false ]; then
     echo "Installing missing dependencies..."
