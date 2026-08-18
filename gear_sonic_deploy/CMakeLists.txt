@@ -23,11 +23,26 @@ include(CheckLanguage)
 # Optional builds
 option(BUILD_SRCS "Build sources" ON)
 
+# Inference backend. ON (default) keeps upstream behaviour: TensorRT + CUDA.
+# OFF selects the ONNX Runtime CPU backend in src/OrtInference, which is the only
+# option on hosts without an NVIDIA GPU. Configure with -DUSE_TENSORRT=OFF.
+option(USE_TENSORRT "Use the TensorRT/CUDA inference backend" ON)
+
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-find_package(TensorRT REQUIRED)
+if(USE_TENSORRT)
+    add_compile_definitions(USE_TENSORRT=1)
+    find_package(TensorRT REQUIRED)
+else()
+    add_compile_definitions(USE_TENSORRT=0)
+    message(STATUS "🧠 USE_TENSORRT=OFF - building against ONNX Runtime (CPU execution provider)")
+endif()
 find_package(Threads REQUIRED)
 find_package(onnxruntime REQUIRED)
+
+# ── CUDA discovery (TensorRT backend only) ──────────────────────────────────
+# Body left un-reindented so the diff against upstream stays two lines.
+if(USE_TENSORRT)
 # Find CUDA Toolkit with proper environment variable support
 if(DEFINED ENV{CUDAToolkit_ROOT})
     set(CUDAToolkit_ROOT $ENV{CUDAToolkit_ROOT})
@@ -222,6 +237,7 @@ else()
    - Run 'ls -la /usr/local/cuda*' to verify CUDA installation")
     endif()
 endif()
+endif()  # USE_TENSORRT -- end of CUDA discovery
 find_package(ZLIB REQUIRED)
 
 # Use local unitree_sdk2 subfolder

@@ -1,3 +1,7 @@
-add_subdirectory(TRTInference)
+if(USE_TENSORRT)
+  add_subdirectory(TRTInference)
+else()
+  add_subdirectory(OrtInference)
+endif()
 add_subdirectory(g1)
 add_subdirectory(audio_thread)

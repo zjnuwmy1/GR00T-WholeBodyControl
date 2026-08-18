@@ -31,8 +31,18 @@
 #include <iostream>
 #include <algorithm>
 #include <numeric>
+#if !defined(USE_TENSORRT) || USE_TENSORRT
 #include <cuda_runtime.h>
 #include <TRTInference/InferenceEngine.h>
+using InferenceBackend = TRTInferenceEngine;
+#else
+// CPU build: OrtInference mirrors the TRT engine's API and supplies no-op stubs
+// for the cudaStream_t / cudaStream*() surface used below, so the bodies of
+// Initialize/Infer/Destroy compile unchanged. CUDA graph capture is compiled
+// out entirely -- it is an optional fast path with an Enqueue() fallback.
+#include <OrtInference/InferenceEngine.h>
+using InferenceBackend = OrtInferenceEngine;
+#endif
 #include "robot_parameters.hpp"
 
 /**
@@ -65,7 +75,7 @@ public:
     try {
       std::cout << "Loading policy model..." << std::endl;
 
-      inference_engine_ = std::make_unique<TRTInferenceEngine>();
+      inference_engine_ = std::make_unique<InferenceBackend>();
 
       // Setup options for ONNX to TensorRT conversion
       Options options;
@@ -285,6 +295,14 @@ public:
       return true; 
     }
 
+#if defined(USE_TENSORRT) && !USE_TENSORRT
+    // CPU backend: there are no CUDA graphs to capture. Return success -- callers
+    // treat false as fatal -- and leave graph_captured_ false so Infer() keeps
+    // taking the Enqueue() path. Saying so explicitly beats a "captured
+    // successfully" line that would be a lie in every CPU log.
+    std::cout << "Control policy: CUDA graph capture skipped (ONNX Runtime CPU backend)" << std::endl;
+    return true;
+#else
     std::cout << "Capturing control policy CUDA graph..." << std::endl;
     cudaStreamBeginCapture(cuda_stream_, cudaStreamCaptureModeRelaxed);
     if (!inference_engine_->Enqueue(cuda_stream_)) {
@@ -300,6 +318,7 @@ public:
     graph_captured_ = true;
     std::cout << "✓ Control policy CUDA graph captured successfully!" << std::endl;
     return true;
+#endif
   }
 
   /**
@@ -417,7 +436,7 @@ private:
   Config config_;
 
   // TensorRT inference engine
-  std::unique_ptr<TRTInferenceEngine> inference_engine_;
+  std::unique_ptr<InferenceBackend> inference_engine_;
 
   // Tensor names
   std::string input_tensor_name_;

@@ -184,15 +184,26 @@ set(EXE_INCLUDES
 add_library(g1_deploy_shared STATIC ${PROJECT_SRCS})
 target_include_directories(g1_deploy_shared PUBLIC ${EXE_INCLUDES})
 
-# List of libs to link for both the main executable and the tests
+# List of libs to link for both the main executable and the tests.
+# The inference backend and everything CUDA-side of it drop out under
+# -DUSE_TENSORRT=OFF; OrtInference brings its own onnxruntime linkage.
+if(USE_TENSORRT)
+  set(BACKEND_LIBS
+    TRTInference
+    CUDA::cudart
+    ${TensorRT_nvinfer_LIBRARY} ${TensorRT_nvonnxparser_LIBRARY}
+    ${CUDLA_LIBRARY}
+  )
+else()
+  set(BACKEND_LIBS OrtInference)
+endif()
+
 set(EXE_LIBS
   g1_deploy_shared
   audio_thread
   unitree_sdk2 ZLIB::ZLIB
-  onnxruntime::onnxruntime TRTInference
-  CUDA::cudart
-  ${TensorRT_nvinfer_LIBRARY} ${TensorRT_nvonnxparser_LIBRARY}
-  ${CUDLA_LIBRARY}
+  onnxruntime::onnxruntime
+  ${BACKEND_LIBS}
   ${ZMQ_LIBRARY}
 )
 

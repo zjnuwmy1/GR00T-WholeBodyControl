@@ -39,8 +39,15 @@
 #include <iostream>
 #include <algorithm>
 #include <numeric>
+#if !defined(USE_TENSORRT) || USE_TENSORRT
 #include <cuda_runtime.h>
 #include <TRTInference/InferenceEngine.h>
+using InferenceBackend = TRTInferenceEngine;
+#else
+// See control_policy.hpp for why the CPU backend needs no other change here.
+#include <OrtInference/InferenceEngine.h>
+using InferenceBackend = OrtInferenceEngine;
+#endif
 
 /**
  * @class EncoderEngine
@@ -72,7 +79,7 @@ public:
     try {
       std::cout << "Loading encoder model..." << std::endl;
 
-      inference_engine_ = std::make_unique<TRTInferenceEngine>();
+      inference_engine_ = std::make_unique<InferenceBackend>();
 
       Options options;
       options.deviceID = config_.device_id;
@@ -275,6 +282,11 @@ public:
       return true; 
     }
 
+#if defined(USE_TENSORRT) && !USE_TENSORRT
+    // See PolicyEngine::CaptureGraph -- no CUDA graphs on the CPU backend.
+    std::cout << "Encoder: CUDA graph capture skipped (ONNX Runtime CPU backend)" << std::endl;
+    return true;
+#else
     std::cout << "Capturing encoder CUDA graph..." << std::endl;
     cudaStreamBeginCapture(cuda_stream_, cudaStreamCaptureModeRelaxed);
     if (!inference_engine_->Enqueue(cuda_stream_)) {
@@ -284,12 +296,13 @@ public:
     }
     cudaStreamEndCapture(cuda_stream_, &cuda_graph_);
     cudaStreamSynchronize(cuda_stream_);
-    
+
     cudaGraphInstantiate(&cuda_graph_exec_, cuda_graph_, NULL, NULL, 0);
-    
+
     graph_captured_ = true;
     std::cout << "✓ Encoder CUDA graph captured successfully!" << std::endl;
     return true;
+#endif
   }
 
   /**
@@ -388,7 +401,7 @@ private:
   Config config_;
 
   // TensorRT inference engine
-  std::unique_ptr<TRTInferenceEngine> inference_engine_;
+  std::unique_ptr<InferenceBackend> inference_engine_;
 
   // Tensor names
   std::string input_tensor_name_;

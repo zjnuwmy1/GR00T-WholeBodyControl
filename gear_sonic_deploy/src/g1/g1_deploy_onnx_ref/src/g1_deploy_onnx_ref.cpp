@@ -46,7 +46,9 @@
  *   --policy-fp16         | Use FP16 for policy TensorRT engine
  */
 #include <cmath>
+#if !defined(USE_TENSORRT) || USE_TENSORRT
 #include <cuda_runtime_api.h>
+#endif
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -76,8 +78,12 @@
 #include <unitree/idl/hg/LowState_.hpp>
 #include <unitree/robot/b2/motion_switcher/motion_switcher_client.hpp>
 
-// TRTInference
+// Inference backend (Options/Precision/DataType live here for both backends)
+#if !defined(USE_TENSORRT) || USE_TENSORRT
 #include <TRTInference/InferenceEngine.h>
+#else
+#include <OrtInference/InferenceEngine.h>
+#endif
 
 // ONNX
 #include <onnxruntime_cxx_api.h>
@@ -93,7 +99,13 @@
 
 // New Planner Classes
 #include "../include/localmotion_kplanner.hpp"
+#if !defined(USE_TENSORRT) || USE_TENSORRT
 #include "../include/localmotion_kplanner_tensorrt.hpp"
+#else
+// Both planners derive from LocalMotionPlannerBase and planner_ is held by base
+// pointer, so selecting a backend is just picking which one to construct.
+#include "../include/localmotion_kplanner_onnx.hpp"
+#endif
 
 // Utility classes
 #include "../include/utils.hpp"
@@ -121,7 +133,9 @@
 
 #include "../include/output_interface/zmq_output_handler.hpp"
 
+#if !defined(USE_TENSORRT) || USE_TENSORRT
 #include <cuda_runtime.h>
+#endif
 #include "../include/state_logger.hpp"
 
 // Encoder
@@ -220,6 +234,12 @@ class G1Deploy {
     // =========================================================================
     // New unified planner interface
     std::string planner_path;
+#if defined(USE_TENSORRT) && !USE_TENSORRT
+    // LocalMotionPlannerONNX borrows these by reference for the lifetime of the
+    // planner, so they must outlive planner_ -- declared before it on purpose.
+    Ort::Env ort_env_{ORT_LOGGING_LEVEL_WARNING, "g1_deploy_planner"};
+    Ort::AllocatorWithDefaultOptions ort_allocator_;
+#endif
     std::unique_ptr<LocalMotionPlannerBase> planner_;
     std::shared_ptr<MotionSequence> planner_motion_;
     
@@ -2413,7 +2433,13 @@ class G1Deploy {
           std::cout << "Unsupported planner version: " << planner_path << std::endl;
           throw std::runtime_error("Unsupported planner version: " + planner_path);
         }
+#if !defined(USE_TENSORRT) || USE_TENSORRT
         planner_ = std::make_unique<LocalMotionPlannerTensorRT>(planner_fp16, 0, planner_config);
+#else
+        // planner_fp16 is not honoured on CPU: ORT's CPU provider has no fast
+        // fp16 path, so the fp32 graph is used regardless.
+        planner_ = std::make_unique<LocalMotionPlannerONNX>(ort_env_, ort_allocator_, planner_config);
+#endif
       }
       
       // Initialize observation function map
