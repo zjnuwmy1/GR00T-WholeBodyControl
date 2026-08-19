@@ -157,10 +157,11 @@ class ZMQManager : public InputInterface {
     }
 
     void update() override {
-      // Reset per-frame flags
+      // Reset per-frame flags.
+      // start_control_ is deliberately NOT reset here: it is a latch, cleared
+      // only when consumed or on stop. See its declaration for why.
       emergency_stop_ = false;
       report_temperature_flag_ = false;
-      start_control_ = false;
       stop_control_ = false;
       
       // Handle stdin shortcuts
@@ -318,6 +319,7 @@ class ZMQManager : public InputInterface {
         report_temperature_flag_ = false;
       }
       if (emergency_stop_) {
+        start_control_ = false;   // a pending start must never survive an e-stop
         operator_state.stop = true;
         if (planner_state.enabled) {
           planner_state.enabled = false;
@@ -341,6 +343,7 @@ class ZMQManager : public InputInterface {
 
       // Handle stop control
       if (stop_control_) {
+        start_control_ = false;   // a pending start must never survive a stop
         operator_state.stop = true;
         if (planner_state.enabled) {
           planner_state.enabled = false;
@@ -525,6 +528,7 @@ class ZMQManager : public InputInterface {
 
       // Handle start control
       if (start_control_ && !operator_state.start) {
+        start_control_ = false;   // latch consumed
         operator_state.start = true;
         {
           std::lock_guard<std::mutex> lock(current_motion_mutex);
@@ -1240,7 +1244,21 @@ class ZMQManager : public InputInterface {
     // ------------------------------------------------------------------
     bool emergency_stop_ = false;  ///< Set by 'O'/'o' keyboard shortcut.
     bool report_temperature_flag_ = false;  ///< Set by 'F'/'f' keyboard shortcut.
-    bool start_control_ = false;   ///< Start request from command message.
+    /// Start request from a command message. LATCHED, not per-frame.
+    ///
+    /// It used to be cleared at the top of every update(), which silently
+    /// dropped the operator's start whenever that same command also changed
+    /// mode: update() set the flag and, because the mode changed, called
+    /// TriggerSafetyReset(); handlePlannerInput() then consumed that reset and
+    /// returned *before* reaching the start block; the next update() cleared the
+    /// flag. gui_drive.py sends exactly that shape -
+    /// build_command_message(start=True, planner=True) - so the first press of
+    /// "start policy" after a mode change never took and the operator had to
+    /// press twice.
+    ///
+    /// Now cleared only where it is meaningful: when consumed, and on stop /
+    /// e-stop so a pending start can never survive one.
+    bool start_control_ = false;
     bool stop_control_ = false;    ///< Stop request from command message.
 
     /// True once the planner has been initialised and is generating motions.
