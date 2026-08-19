@@ -121,6 +121,21 @@ export CMAKE_PREFIX_PATH="$CMAKE_PATHS:$CMAKE_PREFIX_PATH"
 export OPENSSL_ROOT_DIR="/usr"
 
 # ROS2 Environment Setup - dynamically find ROS2 installation
+#
+# Honour a caller that explicitly disabled ROS2. This block used to
+# `export HAS_ROS2=1` unconditionally whenever a ROS2 install existed,
+# overriding HAS_ROS2=0 from the environment. That doesn't just flip a CMake
+# option: sourcing the ROS setup.bash also puts /opt/ros/<distro>/lib on
+# LD_LIBRARY_PATH, so the binary links rclcpp/rmw and loads a second DDS stack
+# next to unitree_sdk2's bundled libddsc. On one host that mix crashed at
+# startup (free(): invalid pointer); on another it "worked" except DDS readers
+# nondeterministically never matched on the real NIC - the deploy sat in
+# "LowState is not available" forever while standalone probes on the same
+# machine received 1 kHz. HAS_ROS2=0 must therefore keep ROS2 out entirely.
+if [ "${HAS_ROS2:-}" = "0" ]; then
+    echo "ℹ️  HAS_ROS2=0 set by caller - skipping ROS2 environment setup entirely"
+    ROS2_FOUND=skip
+else
 ROS2_FOUND=false
 
 # Common ROS2 distributions in order of preference (newest first)
@@ -155,6 +170,7 @@ if [ "$ROS2_FOUND" = false ]; then
     echo "   Building will continue without ROS2InputHandler"
     export HAS_ROS2=0
 fi
+fi  # end of HAS_ROS2=0 caller-override guard
 
 # Set up production FastRTPS profile
 if [ -f "src/g1/g1_deploy_onnx_ref/config/fastrtps_profile.xml" ]; then
