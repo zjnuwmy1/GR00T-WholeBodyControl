@@ -2758,6 +2758,17 @@ class G1Deploy {
       if (!ls) {
         return false;
       }
+      // Gate on the torso IMU as well. INIT only ever waited for LowState, so a
+      // secondary_imu reader whose DDS matching silently failed (seen through a
+      // switch that mishandles multicast discovery) still reached "Init Done" --
+      // and the deploy then killed itself on the operator's START, because the
+      // first CONTROL tick found imu_torso_buffer_ empty and
+      // GatherRobotStateToLogger() treats that as fatal. Holding INIT here turns
+      // that late failure into a visible "waiting for robot to be ready" loop
+      // before any start can be accepted.
+      if (!imu_torso_buffer_.GetDataWithTime().data) {
+        return false;
+      }
       MotorCommand motor_command_tmp;
       for (int i = 0; i < G1_NUM_MOTOR; ++i) {
         motor_command_tmp.tau_ff.at(i) = 0.0;
