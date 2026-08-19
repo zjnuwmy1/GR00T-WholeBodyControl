@@ -2752,23 +2752,26 @@ class G1Deploy {
      * transitions to WAIT_FOR_CONTROL and the Dex3 hands open.
      * @return True once LowState data is available; false if not yet ready.
      */
+    /// Which input INIT is still waiting on. Read by the INIT wait log so the
+    /// message names the actual empty buffer -- see init_wait_reason_.
+    const char* init_wait_reason_ = "starting";
+
     bool InitControl() {
       auto low_state_data = low_state_buffer_.GetDataWithTime();
       const std::shared_ptr<const LowState_> ls = low_state_data.data;
       if (!ls) {
+        init_wait_reason_ = "rt/lowstate (no LowState received yet)";
         return false;
       }
-      // Gate on the torso IMU as well. INIT only ever waited for LowState, so a
-      // secondary_imu reader whose DDS matching silently failed (seen through a
-      // switch that mishandles multicast discovery) still reached "Init Done" --
-      // and the deploy then killed itself on the operator's START, because the
-      // first CONTROL tick found imu_torso_buffer_ empty and
-      // GatherRobotStateToLogger() treats that as fatal. Holding INIT here turns
-      // that late failure into a visible "waiting for robot to be ready" loop
-      // before any start can be accepted.
-      if (!imu_torso_buffer_.GetDataWithTime().data) {
-        return false;
-      }
+      // Deliberately NOT gated on the torso IMU (rt/secondary_imu). That IMU
+      // feeds StateLogger::LogFullState() and nothing else; the policy
+      // observations and every control path read the IMU embedded in LowState
+      // (ls->imu_state()). Gating INIT on it made the deploy sit in INIT for
+      // 10+ minutes on a robot whose control inputs were completely healthy.
+      // The reason the gate was added -- the deploy killing itself on START --
+      // is fixed properly in GatherRobotStateToLogger(): a missing telemetry
+      // input must not stop a running controller.
+      init_wait_reason_ = "";
       MotorCommand motor_command_tmp;
       for (int i = 0; i < G1_NUM_MOTOR; ++i) {
         motor_command_tmp.tau_ff.at(i) = 0.0;
@@ -2848,9 +2851,28 @@ class G1Deploy {
       auto imu_data = imu_torso_buffer_.GetDataWithTime();
       const std::shared_ptr<const LowState_> ls = low_state_data.data;
       const std::shared_ptr<const IMUState_> imu_torso = imu_data.data;
-      if (!ls || !imu_torso) {
-        std::cout << "✗ Error: LowState or IMUState is not available in the middle of the control loop!" << std::endl;
+      // LowState is genuinely required: it carries the joint state and the IMU
+      // the policy actually observes. Returning false here stops control, which
+      // is correct.
+      if (!ls) {
+        std::cout << "✗ Error: LowState is not available in the middle of the control loop!" << std::endl;
         return false;
+      }
+      // The torso IMU (rt/secondary_imu) is NOT required. It is consumed solely
+      // by StateLogger::LogFullState below -- telemetry. Treating it as fatal
+      // meant a stalled or absent secondary_imu reader stopped a robot whose
+      // control inputs were perfectly healthy: observed on this hardware as
+      // "Init Done -> operator START -> immediate shutdown", with rt/lowstate
+      // flowing at 1 kHz the whole time. Log zeros for the torso fields and keep
+      // controlling; warn once per second so the missing telemetry is visible.
+      if (!imu_torso) {
+        static auto last_warn = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+        const auto now_tp = std::chrono::steady_clock::now();
+        if (now_tp - last_warn >= std::chrono::seconds(1)) {
+          last_warn = now_tp;
+          std::cout << "⚠ rt/secondary_imu (torso IMU) unavailable -- logging torso fields as zero, "
+                       "control continues on the LowState IMU" << std::endl;
+        }
       }
       used_low_state_data_ = (low_state_data);
       used_imu_torso_data_ = (imu_data);
@@ -2933,9 +2955,15 @@ class G1Deploy {
       std::array<double, 3> base_ang_vel = float_to_double<3>(ls->imu_state().gyroscope());
       std::array<double, 3> base_accel = float_to_double<3>(ls->imu_state().accelerometer());
 
-      std::array<double, 4> body_torso_quat = float_to_double<4>(imu_torso->quaternion()); //qw, qx, qy, qz 
-      std::array<double, 3> body_torso_ang_vel = float_to_double<3>(imu_torso->gyroscope());
-      std::array<double, 3> body_torso_accel = float_to_double<3>(imu_torso->accelerometer());
+      // Telemetry-only; imu_torso may legitimately be null (see the warning
+      // above). Identity quaternion + zero rates is the neutral placeholder.
+      std::array<double, 4> body_torso_quat =
+          imu_torso ? float_to_double<4>(imu_torso->quaternion())        //qw, qx, qy, qz
+                    : std::array<double, 4>{1.0, 0.0, 0.0, 0.0};
+      std::array<double, 3> body_torso_ang_vel =
+          imu_torso ? float_to_double<3>(imu_torso->gyroscope()) : std::array<double, 3>{0.0, 0.0, 0.0};
+      std::array<double, 3> body_torso_accel =
+          imu_torso ? float_to_double<3>(imu_torso->accelerometer()) : std::array<double, 3>{0.0, 0.0, 0.0};
 
       // Collect hand states from Dex3 hands
       std::array<double, 7> left_hand_q = {0.0};
@@ -3840,7 +3868,20 @@ class G1Deploy {
       switch (program_state_) {
         case ProgramState::INIT:
           if (!InitControl()) {
-            std::cout << "LowState is not available, waiting for robot to be ready" << std::endl;
+            // Name the buffer that is actually empty. This used to print
+            // "LowState is not available" for BOTH gates, so a run blocked on the
+            // torso IMU looked exactly like a dead LowState link -- which sent a
+            // whole debugging session after the network, the switch's multicast
+            // handling and the LowState CRC path while LowState was arriving
+            // normally the entire time. Rate-limited to ~1 Hz: the old message
+            // printed at 50 Hz and produced 20k log lines per run.
+            static auto last_print = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+            const auto now_tp = std::chrono::steady_clock::now();
+            if (now_tp - last_print >= std::chrono::seconds(1)) {
+              last_print = now_tp;
+              std::cout << "[INIT] waiting for " << init_wait_reason_
+                        << " -- robot not ready yet" << std::endl;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
           }
           // Re-publish robot_config so late-joining subscribers can receive it
